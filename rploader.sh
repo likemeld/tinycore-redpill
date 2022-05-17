@@ -1,13 +1,13 @@
 #!/bin/bash
 #
 # Author :
-# Date : 220502
-# Version : 0.7.0.7
+# Date : 220516
+# Version : 0.7.1.3
 #
 #
 # User Variables :
 
-rploaderver="0.7.0.7"
+rploaderver="0.7.1.3"
 rploaderfile="https://raw.githubusercontent.com/pocopico/tinycore-redpill/main/rploader.sh"
 rploaderrepo="https://github.com/pocopico/tinycore-redpill/raw/main/"
 
@@ -17,11 +17,104 @@ modalias4="https://raw.githubusercontent.com/pocopico/tinycore-redpill/main/modu
 modalias3="https://raw.githubusercontent.com/pocopico/tinycore-redpill/main/modules.alias.3.json.gz"
 dtcbin="https://raw.githubusercontent.com/pocopico/tinycore-redpill/main/dtc"
 dtsfiles="https://raw.githubusercontent.com/pocopico/tinycore-redpill/main"
+timezone="UTC"
+ntpserver="pool.ntp.org"
 
 fullupdatefiles="custom_config.json global_config.json modules.alias.3.json.gz modules.alias.4.json.gz rpext-index.json user_config.json dtc rploader.sh ds1621p.dts ds920p.dts"
 
 # END Do not modify after this line
 ######################################################################################################
+
+function history() {
+
+    cat <<EOF
+    --------------------------------------------------------------------------------------
+    0.7.0.0 Added build for version greater than 42218
+    0.7.0.1 Added required extension parsing adding and downloading
+    0.7.0.2 Added usb patch in patchdtc
+    0.7.0.3 Added portnumber on patchdtc
+    0.7.0.4 Make sure that local cache folder is created early in the process
+    0.7.0.5 Enabled interactive
+    0.7.0.6 Added save/restore session functions
+    0.7.0.7 Added a check date function
+    0.7.0.8 Added the ability to use local dtb file
+    0.7.0.9 Added flyride satamap review
+    0.7.1.0 Added the history, version and enhanced patchdtc function
+    0.7.1.1 Added a syntaxcheck function
+    0.7.1.2 Added sync time with NTP server : pool.ntp.org (Set timezone and ntpserver variables accordingly )
+    0.7.1.3 Added the option to create JUN mod loader (By Jumkey)
+    --------------------------------------------------------------------------------------
+EOF
+
+}
+
+function syntaxcheck() {
+
+    if [ $# -lt 2 ] && [ "$1" == "download" ] || [ "$1" == "build" ] || [ "$1" == "ext" ] || [ "$1" == "restoresession" ] || [ "$1" == "listmods" ] || [ "$1" == "serialgen" ] || [ "$1" == "patchdtc" ] || [ "$1" == "postupdate" ]; then
+
+        echo "Error : Number of arguments : $#, options $@ "
+        case $1 in
+
+        download)
+            echo "Syntax error, You have to specify one of the existing platforms" && getPlatforms
+            ;;
+
+        build)
+            echo "Syntax error, You have to specify one of the existing platforms" && getPlatforms
+            ;;
+
+        ext)
+            echo "Syntax error, You have to specify one of the existing platforms, the action and the extension URL"
+            echo "example:"
+            echo "rploader.sh ext apollolake-7.0.1-42218 add https://raw.githubusercontent.com/pocopico/rp-ext/master/e1000/rpext-index.json"
+            echo "or for auto detect use"
+            echo "rploader.sh ext apollolake-7.0.1-42218 auto"
+            ;;
+
+        restoresession)
+            echo "Syntax error, You have to specify one of the existing platforms" && getPlatforms
+            ;;
+
+        listmods)
+            echo "Syntax error, You have to specify one of the existing platforms" && getPlatforms
+            ;;
+
+        serialgen)
+            echo "Syntax error, You have to specify one of the existing models"
+            echo "DS3615xs DS3617xs DS916+ DS918+ DS920+ DS3622xs+ FS6400 DVA3219 DVA3221 DS1621+"
+            ;;
+
+        patchdtc)
+            echo "Syntax error, You have to specify one of the existing platforms" && getPlatforms
+            ;;
+
+        postupdate)
+            echo "Syntax error, You have to specify one of the existing platforms" && getPlatforms
+            ;;
+
+        *)
+            echo "Syntax error, not valid arguments or not enough options"
+            showhelp
+            ;;
+
+        esac
+
+        exit 99
+
+    else
+        return
+    fi
+
+}
+
+function version() {
+
+    shift 1
+    echo $rploaderver
+
+    [ "$1" == "history" ] && history
+
+}
 
 function savesession() {
 
@@ -798,6 +891,43 @@ function patchdtc() {
     curl --location --progress-bar "$dtcbin" -O
     chmod 700 dtc
 
+    if [ -f /home/tc/custom-module/${dtbfile}.dts ] && [ ! -f /home/tc/custom-module/${dtbfile}.dtb ]; then
+        echo "Found locally cached dts file ${dtbfile}.dts and dtb file does not exist in cache, converting dts to dtb"
+        ./dtc -q -I dts -O dtb /home/tc/custom-module/${dtbfile}.dts >/home/tc/custom-module/${dtbfile}.dtb
+    fi
+
+    if [ -f /home/tc/custom-module/${dtbfile}.dtb ]; then
+
+        echo "Fould locally cached dtb file"
+        read -p "Should i use that file ? [Yy/Nn]" answer
+        if [ -n "$answer" ] && [ "$answer" = "Y" ] || [ "$answer" = "y" ]; then
+            echo "OK copying over the cached dtb file"
+
+            dtbextfile="$(find /home/tc/redpill-load/custom -name model_${dtbfile}.dtb)"
+            if [ ! -z ${dtbextfile} ] && [ -f ${dtbextfile} ]; then
+                echo -n "Copying patched dtb file ${dtbfile}.dtb to ${dtbextfile} -> "
+                sudo cp /home/tc/custom-module/${dtbfile}.dtb ${dtbextfile}
+                if [ $(sha256sum /home/tc/custom-module/${dtbfile}.dtb | awk '{print $1}') = $(sha256sum ${dtbextfile} | awk '{print $1}') ]; then
+                    echo -e "OK ! File copied and verified !"
+                    return
+                else
+                    echo -e "ERROR !\nFile has not been copied succesfully, you will need to copy it yourself"
+                    return
+                fi
+            else
+                [ -z ${dtbextfile} ] && echo "dtb extension is not loaded and its required for DSM to find disks on ${SYNOMODEL}"
+                echo "Copy of the DTB file ${dtbfile}.dtb to ${dtbextfile} was not succesfull."
+                echo "Please remember to replace the dtb extension model file ..."
+                echo "execute manually : cp ${dtbfile}.dtb ${dtbextfile} and re-run"
+                exit 99
+            fi
+        else
+            echo "OK lets continue patching"
+        fi
+    else
+        echo "No cached dtb file found in /home/tc/custom-module/${dtbfile}.dtb"
+    fi
+
     if [ ! -f ${dtbfile}.dts ]; then
         echo "dts file for ${dtbfile} not found, trying to download"
         curl --location --progress-bar -O "${dtsfiles}/${dtbfile}.dts"
@@ -950,69 +1080,103 @@ function backup() {
 }
 
 function satamap() {
+    # This function will attempt to identify all disk controllers and create sataportmap and diskidxmap.
+    # Since we cannot know how many ports are on the controllers, we ask the user for the desired number
+    # of disk ports to be mapped into DSM.
+    #
+    # In the case of VMware, we assume the user intends to SATABOOT. While TinyCore suppresses creation
+    # of the /dev/sd device servicing synoboot, the controller still takes up a sataportmap entry.
+    # ThorGroup advised not to map the controller ports beyond the MaxDisks limit but there does not
+    # appear to be any harm in doing so - unless additional devices are connected along with SATABOOT.
+    # If we allow other devices on the SATABOOT controller, there will be an unavoidable empty slot 1.
+    #
+    # By mapping the SATABOOT controller ports beyond MaxDisks, we force standardization of user data
+    # disks onto a secondary controller, and furthermore, it's clear what the SATABOOT controller and
+    # device are being used for. Therefore, we must positively identify the SATABOOT controller, which
+    # ought to be the first virtual SATA controller encountered. If any other drives are connected to
+    # it, they are ignored.
+    #
+    # This code was written with the intention of reusing the detection strategy for device tree
+    # creation, and the two functions could easily be integrated if desired.
 
     checkmachine
-
     checkforscsi
 
-    let controller=0
-    let diskidxmap=0
+    let diskidxmapidx=0
+    sataportmap=""
+    diskidxmap=""
 
+    maxdisks=$(jq -r ".synoinfo.maxdisks" user_config.json)
+
+    # get all controllers PCI class 100 = SCSI, 104 = RAIDHBA, 106 = SATA, 107 = SAS
+    hbas=$(
+        lspci -d ::106
+        lspci -d ::100
+        lspci -d ::104
+        lspci -d ::107
+    )
+    # fix list to newlines
+    S_IFS=$IFS
+    IFS=$'\n' hbas=($hbas)
+    IFS=$S_IFS
+
+    # look expressly for first VMWARE SATA for sataboot
     if [ "$MACHINE" = "VIRTUAL" ] && [ "$HYPERVISOR" = "VMware" ]; then
-        echo "Running on VMware, Possible working solution, SataPortMap=1 DiskIdxMap=00"
-    else
-        for hba in $(lsscsi -Hv | grep pci | grep -v usb | cut -c 44-50 | uniq); do
-            if [ $(lsscsi -Hv | grep "$hba" | grep ata | wc -l) -gt 0 ]; then
-                echo "HBA: $hba Disks : $(lsscsi -Hv | grep "$hba" | wc -l)"
-                lsscsi -Hv | grep "$hba" | wc -l >>satamap.$$
-                if [ $controller = 0 ]; then
-                    printf "%02X" $diskidxmap >>diskmap.$$
-                else
-                    let diskidxmap=$diskidxmap+$(lsscsi -Hv | grep "$hba" | wc -l)
-                    printf "%02X" $diskidxmap >>diskmap.$$
-                fi
+        vmsb=$(echo $hbas | fgrep -i "vmware sata ahci" | head -1 | awk '{ print $1 }')
+    fi
+
+    # loop through controllers
+    for hbatext in "${hbas[@]}"; do
+        hba="$(echo $hbatext | awk -F" " '{print $1}')"
+        # get attached devices
+        ports=$(lsscsi -Nv | fgrep "$hba" | wc -l)
+        echo "Found \"$hbatext\" ($ports drive(s) connected)"
+        # is it the sataboot controller?
+        if [ "$hba" = "$vmsb" ]; then
+            if [ -z "$sataportmap" ]; then
+                echo "NOTE: On VMware, reserve this controller for SATABOOT, and map loader device after maxdisks $maxdisks"
             else
-                if [ $(lsscsi -Hv | grep -B 2 $hba | head -1 | awk '{print $2}' | grep vmw | wc -l) -gt 0 ]; then
-                    pcidev=$(lsscsi -Hv | grep $hba | awk '{print $3}')
-                    echo "HBA: $hba Disks : $(ls -ltrd ${pcidev}/target* | wc -l)"
-                    ls -ltrd ${pcidev}/target* | wc -l >>satamap.$$
-                    if [ $controller = 0 ]; then
-                        printf "%02X" $diskidxmap >>diskmap.$$
-                    else
-                        let diskidxmap=$diskidxmap+$(lsscsi -Hv | grep "$hba" | wc -l)
-                        printf "%02X" $diskidxmap >>diskmap.$$
-                    fi
-                else
-                    pcidev=$(lsscsi -Hv | grep $hba | awk '{print $3}')
-                    echo "HBA: $hba Disks : $(ls -ltrd ${pcidev}/port* | wc -l)"
-                    ls -ltrd ${pcidev}/port* | wc -l >>satamap.$$
-                    if [ $controller = 0 ]; then
-                        printf "%02X" $diskidxmap >>diskmap.$$
-                    else
-                        let diskidxmap=$diskidxmap+$(lsscsi -Hv | grep "$hba" | wc -l)
-                        printf "%02X" $diskidxmap >>diskmap.$$
-                    fi
+                echo "WARNING: the first controller should be virtual SATA attached to the loader image. SATABOOT will probably fail!"
+            fi
+
+            [ ${ports} -gt 1 ] && echo "WARNING: Additional devices detected on this controller. These will be inaccessible!"
+            sataportmap=$sataportmap"1"
+            diskidxmap=$diskidxmap$(printf "%02x" $maxdisks)
+        else
+            # not SATABOOT controller
+            echo -n "How many ports should be mapped for this controller? [0-9] <$ports> "
+            read newports
+            if [ ! -z $newports ]; then
+                ports=$newports
+                if ! [ "$ports" -eq "$ports" ] 2>/dev/null; then
+                    echo "Non-numeric, overridden to 0"
+                    ports=0
+                fi
+                if [ $ports -gt 9 ]; then
+                    echo "Overridden to the max value for SataPortMap = 9"
+                    ports=9
                 fi
             fi
-            let controller=$controller+1
-        done
-
-        sataportmap=$(cat satamap.$$ | tr -d '\n')
-        diskidxmap=$(cat diskmap.$$ | tr -d '\n')
-        echo "SataPortMap=$sataportmap"
-        echo "DiskIdxMap=$diskidxmap"
-
-        echo "Should i update the user_config.json with these values ? [Yy/Nn]"
-        read answer
-        if [ -n "$answer" ] && [ "$answer" = "Y" ] || [ "$answer" = "y" ]; then
-            sed -i "/\"SataPortMap\": \"/c\    \"SataPortMap\": \"$sataportmap\"," user_config.json
-            sed -i "/\"DiskIdxMap\": \"/c\    \"DiskIdxMap\": \"$diskidxmap\"" user_config.json
-        else
-            echo "OK remember to update manually by editing user_config.json file"
+            sataportmap=$sataportmap$ports
+            diskidxmap=$diskidxmap$(printf "%02x" $diskidxmapidx)
+            let diskidxmapidx=$diskidxmapidx+$ports
+            # warn if exceeding maxdisks
+            [ $diskidxmapidx -gt $maxdisks ] && echo "WARNING: number of mapped ports exceed maxdisks $maxdisks"
         fi
+    done
 
-        rm satamap.$$
-        rm diskmap.$$
+    echo "SataPortMap=$sataportmap"
+    echo "DiskIdxMap=$diskidxmap"
+
+    echo
+    echo -n "Should i update the user_config.json with these values ? [Yy/Nn] "
+    read answer
+    if [ -n "$answer" ] && [ "$answer" = "Y" ] || [ "$answer" = "y" ]; then
+        json="$(jq --arg var "$sataportmap" '.extra_cmdline.SataPortMap = $var' user_config.json)" && echo -E "${json}" | jq . >user_config.json
+        json="$(jq --arg var "$diskidxmap" '.extra_cmdline.DiskIdxMap = $var' user_config.json)" && echo -E "${json}" | jq . >user_config.json
+        echo "Done."
+    else
+        echo "OK remember to update manually by editing user_config.json file"
     fi
 
 }
@@ -1071,8 +1235,10 @@ function usbidentify() {
         echo "Should i update the user_config.json with these values ? [Yy/Nn]"
         read answer
         if [ -n "$answer" ] && [ "$answer" = "Y" ] || [ "$answer" = "y" ]; then
-            sed -i "/\"pid\": \"/c\    \"pid\": \"$productid\"," user_config.json
-            sed -i "/\"vid\": \"/c\    \"vid\": \"$vendorid\"," user_config.json
+            #  sed -i "/\"pid\": \"/c\    \"pid\": \"$productid\"," user_config.json
+            json="$(jq --arg var "$productid" '.extra_cmdline.pid = $var' user_config.json)" && echo -E "${json}" | jq . >user_config.json
+            #  sed -i "/\"vid\": \"/c\    \"vid\": \"$vendorid\"," user_config.json
+            json="$(jq --arg var "$vendorid" '.extra_cmdline.vid = $var' user_config.json)" && echo -E "${json}" | jq . >user_config.json
         else
             echo "OK remember to update manually by editing user_config.json file"
         fi
@@ -1093,9 +1259,11 @@ function serialgen() {
         echo "Should i update the user_config.json with these values ? [Yy/Nn]"
         read answer
         if [ -n "$answer" ] && [ "$answer" = "Y" ] || [ "$answer" = "y" ]; then
-            sed -i "/\"sn\": \"/c\    \"sn\": \"$serial\"," user_config.json
+            # sed -i "/\"sn\": \"/c\    \"sn\": \"$serial\"," user_config.json
+            json="$(jq --arg var "$serial" '.extra_cmdline.sn = $var' user_config.json)" && echo -E "${json}" | jq . >user_config.json
             macaddress=$(echo $mac | sed -s 's/://g')
-            sed -i "/\"mac1\": \"/c\    \"mac1\": \"$macaddress\"," user_config.json
+            json="$(jq --arg var "$macaddress" '.extra_cmdline.mac1 = $var' user_config.json)" && echo -E "${json}" | jq . >user_config.json
+            # sed -i "/\"mac1\": \"/c\    \"mac1\": \"$macaddress\"," user_config.json
         else
             echo "OK remember to update manually by editing user_config.json file"
         fi
@@ -1456,6 +1624,8 @@ Actions: build, ext, download, clean, update, listmod, serialgen, identifyusb, s
 
 - mountshare:   Mounts a remote CIFS working directory
 
+- version:      Prints rploader version and if the history option is passed then the version history is listed.
+
 Version : $rploaderver
 ----------------------------------------------------------------------------------------
 Available platform versions:
@@ -1582,6 +1752,8 @@ function buildloader() {
     tcrppart="$(mount | grep -i optional | grep cde | awk -F / '{print $3}' | uniq | cut -c 1-3)3"
     local_cache="/mnt/${tcrppart}/auxfiles"
 
+    [ "$1" == "junmod" ] && JUNLOADER="YES"
+
     [ -d $local_cache ] && echo "Found tinycore cache folder, linking to home/tc/custom-module" && [ ! -d /home/tc/custom-module ] && ln -s $local_cache /home/tc/custom-module
 
     cd /home/tc
@@ -1640,7 +1812,12 @@ function buildloader() {
 
     addrequiredexts
 
-    sudo ./build-loader.sh $MODEL $TARGET_VERSION-$TARGET_REVISION loader.img
+    if [ "$JUNLOADER" == "YES" ]; then
+        echo "jun build option has been specified, so JUN MOD loader will be created"
+        sudo BRP_JUN_MOD=1 BRP_DEBUG=1 BRP_USER_CFG=user_config.json ./build-loader.sh $MODEL $TARGET_VERSION-$TARGET_REVISION loader.img
+    else
+        sudo ./build-loader.sh $MODEL $TARGET_VERSION-$TARGET_REVISION loader.img
+    fi
 
     if [ $? -ne 0 ]; then
         echo "FAILED : Loader creation failed check the output for any errors"
@@ -1786,6 +1963,8 @@ function getlatestrploader() {
     REPOSHA="$(sha256sum latestrploader.sh | awk '{print $1}')"
 
     if [ -f latestrploader.sh ] && [ "${CURRENTSHA}" != "${REPOSHA}" ]; then
+        echo "Found newversion : $(bash ./latestrploader.sh version now)"
+        echo "Current version : $(bash ./rploader.sh version now)"
         echo -n "There is a newer version of the script on the repo should we use that ? [yY/nN]"
         read confirmation
         if [ "$confirmation" = "y" ] || [ "$confirmation" = "Y" ]; then
@@ -1896,7 +2075,14 @@ function getvars() {
     echo "Local Cache Folder : $local_cache"
     echo "DATE Internet : $INTERNETDATE Local : $LOCALDATE"
 
-    [ "$INTERNETDATE" != "$LOCALDATE" ] && echo "ERROR ! System DATE is not correct, PLEASE FIX DATE" && exit 99
+    if [ "$INTERNETDATE" != "$LOCALDATE" ]; then
+        echo "ERROR ! System DATE is not correct"
+        echo "Downloading ntpclient to assist"
+        tce-load -iw ntpclient 2>&1 >/dev/null
+        export TZ="${timezone}"
+        sudo ntpclient -s -h ${ntpserver} 2>&1 >/dev/null
+        echo "Current time after communicating with NTP server ${ntpserver} :  $(date) "
+    fi
 
 }
 
@@ -2066,8 +2252,7 @@ function ext_manager() {
 }
 
 if [ $# -lt 2 ]; then
-    showhelp
-    exit 99
+    syntaxcheck $@
 fi
 
 case $1 in
@@ -2102,17 +2287,6 @@ build)
             buildloader
         fi
         ;;
-
-    static)
-        echo "Using static compiled redpill extension"
-        getstaticmodule
-        echo "Got $REDPILL_MOD_NAME "
-        listmodules
-        echo "Starting loader creation "
-        buildloader
-        [ $? -eq 0 ] && savesession
-        ;;
-
     manual)
 
         echo "Using static compiled redpill extension"
@@ -2124,8 +2298,18 @@ build)
         [ $? -eq 0 ] && savesession
         ;;
 
-    *)
-        echo "No extra build option specified, using default <static> "
+    jun)
+        echo "Using static compiled redpill extension"
+        getstaticmodule
+        echo "Got $REDPILL_MOD_NAME "
+        listmodules
+        echo "Starting loader creation "
+        buildloader junmod
+        [ $? -eq 0 ] && savesession
+        ;;
+
+    static | *)
+        echo "No extra build option or static specified, using default <static> "
         echo "Using static compiled redpill extension"
         getstaticmodule
         echo "Got $REDPILL_MOD_NAME "
@@ -2136,9 +2320,11 @@ build)
         ;;
 
     esac
+
     ;;
 
-ext)
+\
+    ext)
     getvars $2
     checkinternet
     gitdownload
@@ -2234,6 +2420,9 @@ mountshare)
     ;;
 installapache)
     installapache
+    ;;
+version)
+    version $@
     ;;
 *)
     showhelp
