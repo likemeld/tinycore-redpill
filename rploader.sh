@@ -1,13 +1,13 @@
 #!/bin/bash
 #
 # Author :
-# Date : 220516
-# Version : 0.7.1.4
+# Date : 220523
+# Version : 0.7.1.8
 #
 #
 # User Variables :
 
-rploaderver="0.7.1.4"
+rploaderver="0.7.1.8"
 rploaderfile="https://raw.githubusercontent.com/pocopico/tinycore-redpill/main/rploader.sh"
 rploaderrepo="https://github.com/pocopico/tinycore-redpill/raw/main/"
 
@@ -44,6 +44,10 @@ function history() {
     0.7.1.2 Added sync time with NTP server : pool.ntp.org (Set timezone and ntpserver variables accordingly )
     0.7.1.3 Added the option to create JUN mod loader (By Jumkey)
     0.7.1.4 Added the use of the additional custom_config_jun.json for JUN mod loader creation
+    0.7.1.5 Updated satamap function to support higher the 9 port counts per HBA.
+    0.7.1.6 Updated satamap function to fix the broken q35 KVM controller, and to stop scanning for CD-ROM's
+    0.7.1.7 Updated serialgen function to include the option for using the realmac
+    0.7.1.8 Updated satamap function to fine tune SATA port identification and identify SATABOOT
     --------------------------------------------------------------------------------------
 EOF
 
@@ -1081,27 +1085,26 @@ function backup() {
 }
 
 function satamap() {
-    # This function will attempt to identify all disk controllers and create sataportmap and diskidxmap.
+    # This function will attempt to identify all SATA controllers and create sataportmap and diskidxmap.
     # Since we cannot know how many ports are on the controllers, we ask the user for the desired number
     # of disk ports to be mapped into DSM.
     #
-    # In the case of VMware, we assume the user intends to SATABOOT. While TinyCore suppresses creation
-    # of the /dev/sd device servicing synoboot, the controller still takes up a sataportmap entry.
-    # ThorGroup advised not to map the controller ports beyond the MaxDisks limit but there does not
-    # appear to be any harm in doing so - unless additional devices are connected along with SATABOOT.
-    # If we allow other devices on the SATABOOT controller, there will be an unavoidable empty slot 1.
+    # In the case of SATABOOT: While TinyCore suppresses the /dev/sd device servicing synoboot, the
+    # controller still takes up a sataportmap entry. ThorGroup advised not to map the controller ports
+    # beyond the MaxDisks limit but there does not appear to be any harm in doing so - unless additional
+    # devices are connected along with SATABOOT. This will create a gap/empty first slot.
     #
     # By mapping the SATABOOT controller ports beyond MaxDisks, we force standardization of user data
-    # disks onto a secondary controller, and furthermore, it's clear what the SATABOOT controller and
-    # device are being used for. Therefore, we must positively identify the SATABOOT controller, which
-    # ought to be the first virtual SATA controller encountered. If any other drives are connected to
-    # it, they are ignored.
+    # disks onto a secondary controller, and it's clear what the SATABOOT controller and device are
+    # being used for. Therefore, we must positively identify it, map it out, and ignore any other drives
+    # connected to it.
+    #
+    # We need something similar to disable the bogus SATA controller in the KVM q35 hardware model.
     #
     # This code was written with the intention of reusing the detection strategy for device tree
     # creation, and the two functions could easily be integrated if desired.
 
     checkmachine
-    checkforscsi
 
     let diskidxmapidx=0
     sataportmap=""
@@ -1109,63 +1112,75 @@ function satamap() {
 
     maxdisks=$(jq -r ".synoinfo.maxdisks" user_config.json)
 
-    # get all controllers PCI class 100 = SCSI, 104 = RAIDHBA, 106 = SATA, 107 = SAS
-    hbas=$(
-        lspci -d ::106
-        lspci -d ::100
-        lspci -d ::104
-        lspci -d ::107
-    )
-    # fix list to newlines
-    S_IFS=$IFS
-    IFS=$'\n' hbas=($hbas)
-    IFS=$S_IFS
-
-    # look expressly for first VMWARE SATA for sataboot
-    if [ "$MACHINE" = "VIRTUAL" ] && [ "$HYPERVISOR" = "VMware" ]; then
-        vmsb=$(echo $hbas | fgrep -i "vmware sata ahci" | head -1 | awk '{ print $1 }')
+    # if we cannot find usb disk, the boot disk must be intended for SATABOOT
+    if [ $(ls -la /sys/block/sd* | fgrep "/usb" | wc -l) -eq 0 ]; then
+        loaderdisk=$(mount | grep -i optional | grep cde | awk -F / '{print $3}' | uniq | cut -c 1-3)
+        sbpci=$(ls -la /sys/block/$loaderdisk | awk -F"/ata" '{print $1}' | awk -F"/" '{print $NF}' | cut --complement -f1 -d:)
     fi
 
-    # loop through controllers
-    for hbatext in "${hbas[@]}"; do
-        hba="$(echo $hbatext | awk -F" " '{print $1}')"
-        # get attached devices
-        ports=$(lsscsi -Nv | fgrep "$hba" | wc -l)
-        echo "Found \"$hbatext\" ($ports drive(s) connected)"
-        # is it the sataboot controller?
-        if [ "$hba" = "$vmsb" ]; then
-            if [ -z "$sataportmap" ]; then
-                echo "NOTE: On VMware, reserve this controller for SATABOOT, and map loader device after maxdisks $maxdisks"
-            else
-                echo "WARNING: the first controller should be virtual SATA attached to the loader image. SATABOOT will probably fail!"
-            fi
+    # get all SATA controllers PCI class 106
+    # 100 = SCSI, 104 = RAIDHBA, 107 = SAS - none of these appear to honor sataportmap/diskidxmap
+    pcis=$(lspci -d ::106 | awk '{print $1}')
 
-            [ ${ports} -gt 1 ] && echo "WARNING: Additional devices detected on this controller. These will be inaccessible!"
+    # loop through controllers in correct order
+    for pci in $pcis; do
+        # get attached block devices (exclude CD-ROMs)
+        ports=$(ls -la /sys/class/ata_device | fgrep "$pci" | wc -l)
+        drives=$(ls -la /sys/block | fgrep "$pci" | grep -v "sr.$" | wc -l)
+        echo -e "\nFound \"$(lspci -s $pci | sed "s/SATA controller: //")\""
+        echo -n "Detected $ports ports/$drives drives. "
+
+        if [ "$pci" = "$sbpci" ]; then
+            # sataboot controller? if so it has to be mapped as first controller (we think)
+            echo "SATABOOT detected. Mapping loader dev after maxdisks"
+            [ ${drives} -gt 1 ] && echo "WARNING: Additional devices are attached. These will be inaccessible!"
             sataportmap=$sataportmap"1"
-            diskidxmap=$diskidxmap$(printf "%02x" $maxdisks)
+            diskidxmap=$diskidxmap$(printf "%02X" $maxdisks)
         else
-            # not SATABOOT controller
-            echo -n "How many ports should be mapped for this controller? [0-9] <$ports> "
-            read newports
-            if [ ! -z $newports ]; then
-                ports=$newports
-                if ! [ "$ports" -eq "$ports" ] 2>/dev/null; then
-                    echo "Non-numeric, overridden to 0"
-                    ports=0
+            if [ "$pci" = "00:1f.2" ] && [ "$HYPERVISOR" = "KVM" ]; then
+                # KVM q35 bogus controller?
+                echo "Reserving and disabling KVM q35 bogus controller"
+                sataportmap=$sataportmap"1"
+                diskidxmap=$diskidxmap$(printf "%02X" $maxdisks)
+            else
+                # handle VMware insane port count
+                if [ "$HYPERVISOR" = "VMware" ] && [ $ports -eq 30 ]; then
+                    echo "Setting 8 VMware virtual ports for compatibility with typical systems"
+                    ports=8
+                fi
+                echo -n "Override # of ports or ENTER to accept <$ports> "
+                read newports
+                if [ ! -z $newports ]; then
+                    ports=$newports
+                    if ! [ "$ports" -eq "$ports" ] 2>/dev/null; then
+                        echo "Non-numeric, overridden to 0"
+                        ports=0
+                    fi
                 fi
                 if [ $ports -gt 9 ]; then
-                    echo "Overridden to the max value for SataPortMap = 9"
-                    ports=9
+                    echo "WARNING: specifying more than 9 ports per controller is unsupported and may affect stability"
+                    let ports=$ports+48
+                    portchar=$(printf \\$(printf "%o" $ports))
+                else
+                    portchar=$ports
                 fi
+                sataportmap=$sataportmap$portchar
+                diskidxmap=$diskidxmap$(printf "%02x" $diskidxmapidx)
+                let diskidxmapidx=$diskidxmapidx+$ports
+                # warn if exceeding maxdisks
+                [ $diskidxmapidx -gt $maxdisks ] && echo "WARNING: the total number of mapped ports exceeds maxdisks"
             fi
-            sataportmap=$sataportmap$ports
-            diskidxmap=$diskidxmap$(printf "%02x" $diskidxmapidx)
-            let diskidxmapidx=$diskidxmapidx+$ports
-            # warn if exceeding maxdisks
-            [ $diskidxmapidx -gt $maxdisks ] && echo "WARNING: number of mapped ports exceed maxdisks $maxdisks"
         fi
     done
 
+    # handle no assigned SATA ports affecting SCSI mapping problem
+    if [ $diskidxmapidx -eq 0 ]; then
+        echo "No SATA ports mapped. Setup for compatibility with SCSI/SAS controller mapping."
+        [ -z $sataportmap ] && sataportmap="1"
+        diskidxmap=$diskidxmap"00"
+    fi
+
+    echo -e "\nRecommended settings:"
     echo "SataPortMap=$sataportmap"
     echo "DiskIdxMap=$diskidxmap"
 
@@ -1179,7 +1194,6 @@ function satamap() {
     else
         echo "OK remember to update manually by editing user_config.json file"
     fi
-
 }
 
 function usbidentify() {
@@ -1251,25 +1265,38 @@ function usbidentify() {
 
 function serialgen() {
 
+    shift 1
+
+    [ "$2" == "realmac" ] && let keepmac=1 || let keepmac=0
+
     if [ "$1" = "DS3615xs" ] || [ "$1" = "DS3617xs" ] || [ "$1" = "DS916+" ] || [ "$1" = "DS918+" ] || [ "$1" = "DS920+" ] || [ "$1" = "DS3622xs+" ] || [ "$1" = "FS6400" ] || [ "$1" = "DVA3219" ] || [ "$1" = "DVA3221" ] || [ "$1" = "DS1621+" ]; then
         serial="$(generateSerial $1)"
         mac="$(generateMacAddress $1)"
+        realmac=$(ifconfig eth0 | head -1 | awk '{print $NF}')
         echo "Serial Number for Model : $serial"
         echo "Mac Address for Model $1 : $mac "
+        [ $keepmac -eq 1 ] && echo "Real Mac Address : $realmac"
+        [ $keepmac -eq 1 ] && echo "Notice : realmac option is requested, real mac will be used"
 
         echo "Should i update the user_config.json with these values ? [Yy/Nn]"
         read answer
         if [ -n "$answer" ] && [ "$answer" = "Y" ] || [ "$answer" = "y" ]; then
             # sed -i "/\"sn\": \"/c\    \"sn\": \"$serial\"," user_config.json
             json="$(jq --arg var "$serial" '.extra_cmdline.sn = $var' user_config.json)" && echo -E "${json}" | jq . >user_config.json
-            macaddress=$(echo $mac | sed -s 's/://g')
+
+            if [ $keepmac -eq 1 ]; then
+                macaddress=$(echo $realmac | sed -s 's/://g')
+            else
+                macaddress=$(echo $mac | sed -s 's/://g')
+            fi
+
             json="$(jq --arg var "$macaddress" '.extra_cmdline.mac1 = $var' user_config.json)" && echo -E "${json}" | jq . >user_config.json
             # sed -i "/\"mac1\": \"/c\    \"mac1\": \"$macaddress\"," user_config.json
         else
             echo "OK remember to update manually by editing user_config.json file"
         fi
     else
-        echo "Error : $2 is not an available model for serial number generation. "
+        echo "Error : $1 is not an available model for serial number generation. "
         echo "Available Models : DS3615xs DS3617xs DS916+ DS918+ DS920+ DS3622xs+ FS6400 DVA3219 DVA3221 DS1621+"
     fi
 
@@ -1604,6 +1631,8 @@ Actions: build, ext, download, clean, update, listmod, serialgen, identifyusb, s
 - serialgen:    Generates a serial number and mac address for the following platforms 
 
                 DS3615xs DS3617xs DS916+ DS918+ DS920+ DS3622xs+ FS6400 DVA3219 DVA3221 DS1621+
+
+                options : realmac , keeps the real mac of interface eth0
 
 - identifyusb:  Tries to identify your loader usb stick VID:PID and updates the user_config.json file 
 
@@ -2018,6 +2047,7 @@ function getvars() {
     local_cache="/mnt/${tcrppart}/auxfiles"
 
     [ ! -d ${local_cache} ] && sudo mkdir -p ${local_cache}
+    [ -h /home/tc/custom-module ] && unlink /home/tc/custom-module
     [ ! -h /home/tc/custom-module ] && sudo ln -s $local_cache /home/tc/custom-module
 
     if [ -z "$TARGET_PLATFORM" ] || [ -z "$TARGET_VERSION" ] || [ -z "$TARGET_REVISION" ]; then
@@ -2362,7 +2392,7 @@ listmods)
     ;;
 
 serialgen)
-    serialgen $2
+    serialgen $@
     ;;
 
 interactive)
